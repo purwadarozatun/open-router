@@ -1,0 +1,5 @@
+[
+  { "domain": "client1.localtest.me", "tenantId": "tenant-1", "target": "http://localhost:9101" },
+  { "domain": "client2.localtest.me", "tenantId": "tenant-2", "target": "http://localhost:9101" },
+  { "domain": "custom.localtest.me", "tenantId": "tenant-1", "target": "http://localhost:9101" }
+]

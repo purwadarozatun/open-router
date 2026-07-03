@@ -4,17 +4,21 @@
 package registry
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 )
 
 // DomainEntry associates a hostname with the tenant and upstream backend it
-// should be routed to.
+// should be routed to. The json tags define the on-disk shape loaded by
+// LoadDomains (see config/domains.json) and the JSON returned by the
+// gateway's /registry route.
 type DomainEntry struct {
-	Domain   string
-	TenantID string
-	Target   string // upstream URL, e.g. "http://localhost:9101"
+	Domain   string `json:"domain"`
+	TenantID string `json:"tenantId"`
+	Target   string `json:"target"` // upstream URL, e.g. "http://localhost:9101"
 }
 
 // ErrNotFound is returned when a domain has no registered entry.
@@ -44,10 +48,40 @@ var mu sync.RWMutex
 // gateway resolves TenantID from the Host here and forwards it upstream as
 // the X-Tenant-ID header (see main.go), so the one backend knows which
 // tenant a request belongs to without keeping its own copy of this mapping.
+//
+// This slice is only the built-in fallback: at startup the gateway calls
+// LoadDomains to replace it with config/domains.json, so the domain list is
+// editable config rather than a recompile. The seed keeps tests and a
+// config-less run working.
 var domains = []DomainEntry{
 	{Domain: "client1.localtest.me", TenantID: "tenant-1", Target: "http://localhost:9101"},
 	{Domain: "client2.localtest.me", TenantID: "tenant-2", Target: "http://localhost:9101"},
 	{Domain: "custom.localtest.me", TenantID: "tenant-1", Target: "http://localhost:9101"}, // simulasi BYOC domain
+}
+
+// LoadDomains replaces the in-memory domain registry with the entries in the
+// JSON file at path (a JSON array of DomainEntry objects — see
+// config/domains.json). Intended to be called once at startup so the domain
+// list is loaded config rather than the hardcoded seed. On any read/parse
+// error the existing domains are left untouched and the error is returned, so
+// a missing or malformed file degrades to the built-in fallback rather than
+// wiping the registry.
+func LoadDomains(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read domains config: %w", err)
+	}
+	var loaded []DomainEntry
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		return fmt.Errorf("parse domains config %s: %w", path, err)
+	}
+	if len(loaded) == 0 {
+		return fmt.Errorf("domains config %s has no entries", path)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	domains = loaded
+	return nil
 }
 
 // IsAllowed reports whether domain is registered. Intended for use as a

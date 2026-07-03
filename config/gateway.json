@@ -1,0 +1,9 @@
+{
+  "httpAddr": ":8085",
+  "httpsAddr": ":8443",
+  "certmagicMode": "selfsigned",
+  "certmagicDataDir": "./certmagic-data",
+  "errorPagePath": "./static/404.html",
+  "domainsConfigPath": "./config/domains.json",
+  "adminHosts": ["localhost", "127.0.0.1"]
+}

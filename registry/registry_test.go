@@ -2,8 +2,60 @@ package registry
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+func TestLoadDomains(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "domains.json")
+	body := `[
+	  {"domain":"a.example.com","tenantId":"tenant-a","target":"http://localhost:9101"},
+	  {"domain":"b.example.com","tenantId":"tenant-b","target":"http://localhost:9101"}
+	]`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	// Snapshot and restore the package-level registry so this test does not
+	// leak its loaded entries into the others.
+	saved := Domains()
+	t.Cleanup(func() {
+		mu.Lock()
+		domains = saved
+		mu.Unlock()
+	})
+
+	if err := LoadDomains(path); err != nil {
+		t.Fatalf("LoadDomains(%q) unexpected error: %v", path, err)
+	}
+	entry, err := Resolve("a.example.com")
+	if err != nil {
+		t.Fatalf("Resolve(a.example.com) after load: %v", err)
+	}
+	if entry.TenantID != "tenant-a" {
+		t.Errorf("Resolve(a.example.com).TenantID = %q, want tenant-a", entry.TenantID)
+	}
+	// The old seed entries must be gone — LoadDomains replaces, not appends.
+	if IsAllowed("client1.localtest.me") {
+		t.Error("IsAllowed(client1.localtest.me) = true after replacing load, want false")
+	}
+}
+
+func TestLoadDomainsErrors(t *testing.T) {
+	// Missing file and empty list are both errors; the registry is untouched.
+	if err := LoadDomains(filepath.Join(t.TempDir(), "missing.json")); err == nil {
+		t.Error("LoadDomains(missing) error = nil, want non-nil")
+	}
+	empty := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(empty, []byte("[]"), 0o644); err != nil {
+		t.Fatalf("write empty config: %v", err)
+	}
+	if err := LoadDomains(empty); err == nil {
+		t.Error("LoadDomains(empty list) error = nil, want non-nil")
+	}
+}
 
 func TestIsAllowed(t *testing.T) {
 	tests := []struct {

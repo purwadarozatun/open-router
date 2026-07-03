@@ -20,6 +20,8 @@ import (
 	"html"
 	"log"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/caddyserver/certmagic"
 	"github.com/gofiber/fiber/v3"
@@ -29,26 +31,59 @@ import (
 	"poc-proxy-gateway/tlsissuer"
 )
 
-// certmagicDataDir is where CertMagic persists issued certificates/keys
-// (FileStorage) and where the self-signed dev CA is written for test
-// clients to trust.
-const certmagicDataDir = "./certmagic-data"
+// gatewayConfigPath is the fixed location of the gateway's own config file
+// (the one file whose path cannot itself come from config). Everything else —
+// listen addresses, TLS mode/dir, asset paths, admin hosts — is read from it
+// at startup via LoadConfig, falling back to defaultConfig.
+const gatewayConfigPath = "./config/gateway.json"
 
-// adminHosts are hostnames served locally by this gateway process itself
-// (the diagnostic routes below), bypassing the reverse proxy. Any other
-// hostname is resolved dynamically against the registry.
-var adminHosts = map[string]bool{
-	"localhost": true,
-	"127.0.0.1": true,
-}
+// errorPageTemplate holds the error page HTML loaded from the configured path
+// at startup. It falls back to a minimal built-in page if the file is missing
+// so the gateway always renders something.
+var errorPageTemplate = `<!doctype html><html lang="id"><head><meta charset="utf-8">` +
+	`<title>{{CODE}} — {{MESSAGE}}</title></head><body>` +
+	`<h1>{{CODE}}</h1><p>{{MESSAGE}}</p></body></html>`
 
 func main() {
+	// Gateway config first: listen addresses, TLS mode/dir, asset paths and
+	// admin hosts all come from here (defaults when the file is absent).
+	cfg := defaultConfig()
+	if loaded, err := LoadConfig(gatewayConfigPath); err != nil {
+		log.Printf("warning: could not load %s, using defaults: %v", gatewayConfigPath, err)
+	} else {
+		cfg = loaded
+		log.Printf("loaded gateway config from %s", gatewayConfigPath)
+	}
+
+	// adminHosts are hostnames served locally by this gateway process itself
+	// (the diagnostic routes below), bypassing the reverse proxy. Any other
+	// hostname is resolved dynamically against the registry.
+	adminHosts := make(map[string]bool, len(cfg.AdminHosts))
+	for _, h := range cfg.AdminHosts {
+		adminHosts[h] = true
+	}
+
 	// renderErrorPage turns any handler/middleware error into a styled HTML
 	// page (e.g. the 404 shown when a Host or an API path is not registered),
 	// instead of Fiber's default plain-text error body.
 	app := fiber.New(fiber.Config{
 		ErrorHandler: renderErrorPage,
 	})
+
+	// Load the static 404 page and the domain list at startup, so both are
+	// editable config/assets rather than compiled-in. Each degrades to a
+	// built-in fallback (the seed domains / minimal error page) on failure
+	// instead of aborting the gateway.
+	if b, err := os.ReadFile(cfg.ErrorPagePath); err != nil {
+		log.Printf("warning: could not load error page %s, using built-in fallback: %v", cfg.ErrorPagePath, err)
+	} else {
+		errorPageTemplate = string(b)
+	}
+	if err := registry.LoadDomains(cfg.DomainsConfigPath); err != nil {
+		log.Printf("warning: could not load %s, using built-in seed domains: %v", cfg.DomainsConfigPath, err)
+	} else {
+		log.Printf("loaded %d domains from %s", len(registry.Domains()), cfg.DomainsConfigPath)
+	}
 
 	// Dynamic reverse proxy: registered first so it sees every request
 	// before route matching. It reads the Host header per request (not a
@@ -137,28 +172,27 @@ func main() {
 		return c.Status(fiber.StatusCreated).JSON(entry)
 	})
 
-	tlsConfig, err := buildTLSConfig()
+	tlsConfig, err := buildTLSConfig(cfg)
 	if err != nil {
 		log.Fatalf("certmagic: %v", err)
 	}
 
 	// Full integration: TLS listener and reverse-proxy routing share this
-	// one `app` — same middleware/routes as the :8085 listener below, just
-	// reached over TLS. fiber.ListenConfig.TLSConfig wraps the listener in
-	// tls.NewListener internally, same effect as the integration task's
+	// one `app` — same middleware/routes as the cfg.HTTPAddr listener below,
+	// just reached over TLS. fiber.ListenConfig.TLSConfig wraps the listener
+	// in tls.NewListener internally, same effect as the integration task's
 	// reference pattern (tls.Listen + app.Listener(ln)) which is Fiber v2
 	// idiom; v3 exposes it as a config field instead. See README for the
 	// end-to-end verification of this listener against the registry.
 	go func() {
-		log.Fatal(app.Listen(":8443", fiber.ListenConfig{
+		log.Fatal(app.Listen(cfg.HTTPSAddr, fiber.ListenConfig{
 			TLSConfig:             tlsConfig,
 			DisableStartupMessage: true,
 		}))
 	}()
 
-	// 8085 chosen to avoid clashing with other local dev services (e.g.
-	// agent-manager on :8080). No significance beyond that.
-	log.Fatal(app.Listen(":8085"))
+	log.Printf("gateway listening: http %s, https %s", cfg.HTTPAddr, cfg.HTTPSAddr)
+	log.Fatal(app.Listen(cfg.HTTPAddr))
 }
 
 // renderErrorPage is Fiber's ErrorHandler: it renders errors returned by the
@@ -176,35 +210,11 @@ func renderErrorPage(c fiber.Ctx, err error) error {
 		message = fe.Message
 	}
 
+	page := strings.ReplaceAll(errorPageTemplate, "{{CODE}}", strconv.Itoa(code))
+	page = strings.ReplaceAll(page, "{{MESSAGE}}", html.EscapeString(message))
+
 	c.Status(code).Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
-	return c.SendString(fmt.Sprintf(`<!doctype html>
-<html lang="id">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>%d — %s</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-         font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-         background: #0b0f1a; color: #e5e9f0; }
-  .card { text-align: center; padding: 3rem 2.5rem; max-width: 30rem; }
-  .code { font-size: 5rem; font-weight: 800; line-height: 1; letter-spacing: -.03em;
-          background: linear-gradient(135deg,#6ea8fe,#a78bfa); -webkit-background-clip: text;
-          background-clip: text; color: transparent; }
-  .msg { margin-top: .75rem; font-size: 1.15rem; color: #c7cede; }
-  .hint { margin-top: 1.5rem; font-size: .85rem; color: #7d879c; }
-  code { background: rgba(255,255,255,.08); padding: .1em .4em; border-radius: .3em; }
-</style>
-</head>
-<body>
-  <div class="card">
-    <div class="code">%d</div>
-    <div class="msg">%s</div>
-    <div class="hint">API Gateway &mdash; host &amp; path harus terdaftar di registry.</div>
-  </div>
-</body>
-</html>`, code, html.EscapeString(message), code, html.EscapeString(message)))
+	return c.SendString(page)
 }
 
 // buildTLSConfig wires CertMagic's on-demand TLS to the domain registry:
@@ -212,7 +222,8 @@ func renderErrorPage(c fiber.Ctx, err error) error {
 // names may ever receive a certificate — this replaces Caddy's
 // `on_demand_tls.ask`.
 //
-// The issuance backend is selected via the CERTMAGIC_MODE env var:
+// The issuance backend is cfg.CertMagicMode, overridable by the
+// CERTMAGIC_MODE env var:
 //
 //   - "acme-staging" — Let's Encrypt staging CA (never production — see
 //     README for why this cannot complete from this dev machine: no public
@@ -220,13 +231,13 @@ func renderErrorPage(c fiber.Ctx, err error) error {
 //   - "selfsigned" (default) — an in-memory root CA that signs on-demand
 //     certs directly, no ACME challenge involved. This is the path that
 //     actually completes end-to-end locally.
-func buildTLSConfig() (*tls.Config, error) {
-	if err := os.MkdirAll(certmagicDataDir, 0o755); err != nil {
+func buildTLSConfig(cfg Config) (*tls.Config, error) {
+	if err := os.MkdirAll(cfg.CertMagicDataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create certmagic data dir: %w", err)
 	}
 
 	magic := certmagic.NewDefault()
-	magic.Storage = &certmagic.FileStorage{Path: certmagicDataDir}
+	magic.Storage = &certmagic.FileStorage{Path: cfg.CertMagicDataDir}
 
 	// HostPolicy — pengganti langsung Caddy `ask`.
 	magic.OnDemand = &certmagic.OnDemandConfig{
@@ -238,7 +249,12 @@ func buildTLSConfig() (*tls.Config, error) {
 		},
 	}
 
-	mode := os.Getenv("CERTMAGIC_MODE")
+	// Config supplies the mode; the CERTMAGIC_MODE env var still wins if set,
+	// so existing run scripts keep working.
+	mode := cfg.CertMagicMode
+	if env := os.Getenv("CERTMAGIC_MODE"); env != "" {
+		mode = env
+	}
 	if mode == "" {
 		mode = "selfsigned"
 	}
@@ -253,7 +269,7 @@ func buildTLSConfig() (*tls.Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("init self-signed issuer: %w", err)
 		}
-		caPath := certmagicDataDir + "/dev-ca.pem"
+		caPath := cfg.CertMagicDataDir + "/dev-ca.pem"
 		if err := os.WriteFile(caPath, ss.CAPEM(), 0o644); err != nil {
 			log.Printf("warning: could not persist dev CA to %s: %v", caPath, err)
 		} else {
