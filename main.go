@@ -84,6 +84,11 @@ func main() {
 	} else {
 		log.Printf("loaded %d domains from %s", len(registry.Domains()), cfg.DomainsConfigPath)
 	}
+	if err := registry.LoadServices(cfg.ServicesConfigPath); err != nil {
+		log.Printf("warning: could not load %s, using built-in seed services: %v", cfg.ServicesConfigPath, err)
+	} else {
+		log.Printf("loaded %d service routes from %s", len(registry.Services()), cfg.ServicesConfigPath)
+	}
 
 	// Dynamic reverse proxy: registered first so it sees every request
 	// before route matching. It reads the Host header per request (not a

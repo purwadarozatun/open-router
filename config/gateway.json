@@ -5,5 +5,6 @@
   "certmagicDataDir": "./certmagic-data",
   "errorPagePath": "./static/404.html",
   "domainsConfigPath": "./config/domains.json",
+  "servicesConfigPath": "./config/services.json",
   "adminHosts": ["localhost", "127.0.0.1"]
 }

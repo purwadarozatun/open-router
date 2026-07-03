@@ -24,6 +24,9 @@ type Config struct {
 	ErrorPagePath string `json:"errorPagePath"`
 	// DomainsConfigPath is the JSON domain list loaded into the registry.
 	DomainsConfigPath string `json:"domainsConfigPath"`
+	// ServicesConfigPath is the JSON path-prefix -> internal service route
+	// table loaded into the registry.
+	ServicesConfigPath string `json:"servicesConfigPath"`
 	// AdminHosts are hostnames served locally by the gateway itself
 	// (diagnostic routes), bypassing the reverse proxy.
 	AdminHosts []string `json:"adminHosts"`
@@ -34,13 +37,14 @@ type Config struct {
 // gateway used before config was externalized.
 func defaultConfig() Config {
 	return Config{
-		HTTPAddr:          ":8085",
-		HTTPSAddr:         ":8443",
-		CertMagicMode:     "selfsigned",
-		CertMagicDataDir:  "./certmagic-data",
-		ErrorPagePath:     "./static/404.html",
-		DomainsConfigPath: "./config/domains.json",
-		AdminHosts:        []string{"localhost", "127.0.0.1"},
+		HTTPAddr:           ":8085",
+		HTTPSAddr:          ":8443",
+		CertMagicMode:      "selfsigned",
+		CertMagicDataDir:   "./certmagic-data",
+		ErrorPagePath:      "./static/404.html",
+		DomainsConfigPath:  "./config/domains.json",
+		ServicesConfigPath: "./config/services.json",
+		AdminHosts:         []string{"localhost", "127.0.0.1"},
 	}
 }
 
