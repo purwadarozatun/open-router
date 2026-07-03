@@ -1,15 +1,26 @@
 // Command dummybackend is a minimal HTTP server used to manually verify the
-// dynamic reverse proxy in main.go. Its root route ("/") responds with
-// "Hello from <tenant> (port <port>)" plus the Host header it received, so
-// two instances on different ports can be curled directly to confirm each
-// serves its own tenant identity before being put behind the proxy. It also
-// echoes back the full request headers it received (as JSON on /headers),
-// so a curl test through the gateway can confirm which headers (Host,
-// X-Forwarded-*) actually reach the upstream.
+// dynamic reverse proxy in main.go. It stands in for the SINGLE shared
+// backend service that serves every tenant: one instance handles all
+// registered domains, and it learns which tenant a request belongs to from
+// the X-Tenant-ID header the gateway injects (resolved from the Host against
+// the registry). Its root route ("/") responds with
+// "Hello from <tenant> (port <port>)" using that per-request tenant, so a
+// curl through the gateway for client1 vs client2 hits the same instance yet
+// reports the correct tenant. It also echoes back the full request headers
+// it received (as JSON on /headers), so a curl test through the gateway can
+// confirm which headers (Host, X-Forwarded-*, X-Tenant-ID) actually reach
+// the upstream.
+//
+// The -name flag labels which microservice this instance stands in for
+// (e.g. tasklist-service, auth-service) so a curl through the path-based
+// router shows which upstream actually handled the request. The -tenant flag
+// is only a fallback tenant label for direct curls that bypass the gateway
+// (no X-Tenant-ID header present).
 //
 // Usage:
 //
-//	go run ./dummybackend -port 9001 -tenant tenant-1
+//	go run ./dummybackend -port 9201 -name tasklist-service
+//	go run ./dummybackend -port 9202 -name auth-service
 package main
 
 import (
@@ -21,9 +32,20 @@ import (
 )
 
 func main() {
-	port := flag.Int("port", 9001, "port to listen on")
-	tenant := flag.String("tenant", "tenant-1", "tenant label returned in responses")
+	port := flag.Int("port", 9101, "port to listen on")
+	tenant := flag.String("tenant", "unknown", "fallback tenant label when no X-Tenant-ID header is present")
+	name := flag.String("name", "dummybackend", "service name this instance stands in for")
 	flag.Parse()
+
+	// tenantOf returns the tenant this request is for: the gateway-injected
+	// X-Tenant-ID header when present, otherwise the -tenant fallback (for
+	// direct curls that skip the gateway).
+	tenantOf := func(r *http.Request) string {
+		if t := r.Header.Get("X-Tenant-ID"); t != "" {
+			return t
+		}
+		return *tenant
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/headers", func(w http.ResponseWriter, r *http.Request) {
@@ -33,17 +55,18 @@ func main() {
 			headers[k] = r.Header.Get(k)
 		}
 		json.NewEncoder(w).Encode(map[string]any{
-			"tenant":     *tenant,
+			"service":    *name,
+			"tenant":     tenantOf(r),
 			"host":       r.Host,
 			"requestURI": r.RequestURI,
 			"headers":    headers,
 		})
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Hello from %s (port %d)\nHost header diterima: %s\n", *tenant, *port, r.Host)
+		fmt.Fprintf(w, "Hello from %s (service %s, port %d)\nHost header diterima: %s\n", tenantOf(r), *name, *port, r.Host)
 	})
 
 	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("dummybackend %s listening on %s", *tenant, addr)
+	log.Printf("dummybackend %q (shared, tenant from X-Tenant-ID) listening on %s", *name, addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }

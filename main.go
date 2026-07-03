@@ -15,7 +15,9 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"html"
 	"log"
 	"os"
 
@@ -41,7 +43,12 @@ var adminHosts = map[string]bool{
 }
 
 func main() {
-	app := fiber.New()
+	// renderErrorPage turns any handler/middleware error into a styled HTML
+	// page (e.g. the 404 shown when a Host or an API path is not registered),
+	// instead of Fiber's default plain-text error body.
+	app := fiber.New(fiber.Config{
+		ErrorHandler: renderErrorPage,
+	})
 
 	// Dynamic reverse proxy: registered first so it sees every request
 	// before route matching. It reads the Host header per request (not a
@@ -64,12 +71,30 @@ func main() {
 		req.Header.Set(fiber.HeaderXForwardedProto, c.Scheme())
 		req.Header.Set(fiber.HeaderXForwardedFor, c.IP())
 
+		// Tenant identity is resolved here from the Host (via the registry)
+		// and forwarded to the shared upstreams as X-Tenant-ID. This is what
+		// makes "many URLs -> one service" work: each backend reads this
+		// header to know which tenant a request belongs to, instead of
+		// running one instance per tenant.
+		req.Header.Set("X-Tenant-ID", entry.TenantID)
+
+		// Path-based routing to microservices: the request path picks the
+		// upstream service (/api/v1/tasklist -> tasklist-service, ...). A path
+		// that matches no registered service route is rejected with 404 — the
+		// gateway only forwards URLs it explicitly knows, it does not fall
+		// through to a default backend.
+		svc, err := registry.ResolveService(c.Path())
+		if err != nil {
+			return fiber.NewError(fiber.StatusNotFound, "route tidak terdaftar")
+		}
+		req.Header.Set("X-Gateway-Service", svc.Name)
+
 		// proxy.Forward(addr) forwards addr verbatim, dropping the
 		// incoming path/query — fine for proxy.DomainForward's own use
 		// but wrong for a real gateway. Do(addr+OriginalURL) preserves
 		// path and query, matching what DomainForward/BalancerForward do
 		// internally.
-		return proxy.Do(c, entry.Target+c.OriginalURL())
+		return proxy.Do(c, svc.Target+c.OriginalURL())
 	})
 
 	app.Get("/", func(c fiber.Ctx) error {
@@ -78,6 +103,13 @@ func main() {
 
 	app.Get("/registry", func(c fiber.Ctx) error {
 		return c.JSON(registry.Domains())
+	})
+
+	// /services exposes the path-prefix -> microservice route table, the
+	// counterpart to /registry (host -> tenant). Diagnostic only; reachable
+	// via adminHosts like the other routes below.
+	app.Get("/services", func(c fiber.Ctx) error {
+		return c.JSON(registry.Services())
 	})
 
 	app.Get("/registry/:domain", func(c fiber.Ctx) error {
@@ -127,6 +159,52 @@ func main() {
 	// 8085 chosen to avoid clashing with other local dev services (e.g.
 	// agent-manager on :8080). No significance beyond that.
 	log.Fatal(app.Listen(":8085"))
+}
+
+// renderErrorPage is Fiber's ErrorHandler: it renders errors returned by the
+// routing middleware/handlers as an HTML page. The two registry-miss cases —
+// unregistered Host and unregistered API path — both reach here as
+// *fiber.Error with StatusNotFound, so the visitor gets a proper 404 page
+// rather than a bare text body. Upstream responses proxied by proxy.Do do not
+// pass through here; only errors this gateway itself raises do.
+func renderErrorPage(c fiber.Ctx, err error) error {
+	code := fiber.StatusInternalServerError
+	message := "Internal Server Error"
+	var fe *fiber.Error
+	if errors.As(err, &fe) {
+		code = fe.Code
+		message = fe.Message
+	}
+
+	c.Status(code).Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
+	return c.SendString(fmt.Sprintf(`<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%d — %s</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background: #0b0f1a; color: #e5e9f0; }
+  .card { text-align: center; padding: 3rem 2.5rem; max-width: 30rem; }
+  .code { font-size: 5rem; font-weight: 800; line-height: 1; letter-spacing: -.03em;
+          background: linear-gradient(135deg,#6ea8fe,#a78bfa); -webkit-background-clip: text;
+          background-clip: text; color: transparent; }
+  .msg { margin-top: .75rem; font-size: 1.15rem; color: #c7cede; }
+  .hint { margin-top: 1.5rem; font-size: .85rem; color: #7d879c; }
+  code { background: rgba(255,255,255,.08); padding: .1em .4em; border-radius: .3em; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="code">%d</div>
+    <div class="msg">%s</div>
+    <div class="hint">API Gateway &mdash; host &amp; path harus terdaftar di registry.</div>
+  </div>
+</body>
+</html>`, code, html.EscapeString(message), code, html.EscapeString(message)))
 }
 
 // buildTLSConfig wires CertMagic's on-demand TLS to the domain registry:

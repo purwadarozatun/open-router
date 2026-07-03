@@ -37,9 +37,16 @@ var mu sync.RWMutex
 // (custom.localtest.me) that maps onto an existing tenant. Add lets new
 // entries be registered at runtime, simulating rows appearing in that
 // future database without a redeploy.
+//
+// All domains resolve to a SINGLE upstream service (:9101). This is the
+// realistic multi-tenant SaaS shape: one application serves every tenant,
+// and tenant identity is carried per request rather than per backend. The
+// gateway resolves TenantID from the Host here and forwards it upstream as
+// the X-Tenant-ID header (see main.go), so the one backend knows which
+// tenant a request belongs to without keeping its own copy of this mapping.
 var domains = []DomainEntry{
 	{Domain: "client1.localtest.me", TenantID: "tenant-1", Target: "http://localhost:9101"},
-	{Domain: "client2.localtest.me", TenantID: "tenant-2", Target: "http://localhost:9102"},
+	{Domain: "client2.localtest.me", TenantID: "tenant-2", Target: "http://localhost:9101"},
 	{Domain: "custom.localtest.me", TenantID: "tenant-1", Target: "http://localhost:9101"}, // simulasi BYOC domain
 }
 
