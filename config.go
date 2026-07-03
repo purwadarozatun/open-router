@@ -1,39 +1,43 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
+	"strings"
 )
 
-// Config holds the gateway's runtime settings, loaded from a JSON file at
-// startup (see config/gateway.json). Every field has a built-in default via
-// defaultConfig, so a missing file or a partial JSON still yields a working
-// gateway — only the keys present in the file override the defaults.
+// Config holds the gateway's runtime settings, read from environment
+// variables at startup (see LoadConfigFromEnv). Every field has a built-in
+// default via defaultConfig, so an env-less run still yields a working
+// gateway — only the variables that are set override the defaults.
 type Config struct {
-	// HTTPAddr is the plain-HTTP listen address (e.g. ":8085").
-	HTTPAddr string `json:"httpAddr"`
-	// HTTPSAddr is the TLS listen address served by CertMagic (e.g. ":8443").
-	HTTPSAddr string `json:"httpsAddr"`
+	// HTTPAddr is the plain-HTTP listen address (GATEWAY_HTTP_ADDR).
+	HTTPAddr string
+	// HTTPSAddr is the TLS listen address served by CertMagic
+	// (GATEWAY_HTTPS_ADDR).
+	HTTPSAddr string
 	// CertMagicMode selects the TLS issuance backend: "selfsigned" or
-	// "acme-staging". The CERTMAGIC_MODE env var, if set, overrides this.
-	CertMagicMode string `json:"certmagicMode"`
-	// CertMagicDataDir is where CertMagic persists certs and the dev CA.
-	CertMagicDataDir string `json:"certmagicDataDir"`
-	// ErrorPagePath is the static HTML template rendered for gateway errors.
-	ErrorPagePath string `json:"errorPagePath"`
-	// DomainsConfigPath is the JSON domain list loaded into the registry.
-	DomainsConfigPath string `json:"domainsConfigPath"`
+	// "acme-staging" (CERTMAGIC_MODE).
+	CertMagicMode string
+	// CertMagicDataDir is where CertMagic persists certs and the dev CA
+	// (CERTMAGIC_DATA_DIR).
+	CertMagicDataDir string
+	// ErrorPagePath is the static HTML template rendered for gateway errors
+	// (GATEWAY_ERROR_PAGE_PATH).
+	ErrorPagePath string
+	// DomainsConfigPath is the JSON domain list loaded into the registry
+	// (GATEWAY_DOMAINS_CONFIG_PATH).
+	DomainsConfigPath string
 	// ServicesConfigPath is the JSON path-prefix -> internal service route
-	// table loaded into the registry.
-	ServicesConfigPath string `json:"servicesConfigPath"`
+	// table loaded into the registry (GATEWAY_SERVICES_CONFIG_PATH).
+	ServicesConfigPath string
 	// AdminHosts are hostnames served locally by the gateway itself
-	// (diagnostic routes), bypassing the reverse proxy.
-	AdminHosts []string `json:"adminHosts"`
+	// (diagnostic routes), bypassing the reverse proxy. Set via
+	// GATEWAY_ADMIN_HOSTS as a comma-separated list.
+	AdminHosts []string
 }
 
-// defaultConfig returns the built-in gateway settings used when no config file
-// is present or when a field is omitted from it. These mirror the values the
+// defaultConfig returns the built-in gateway settings used when the
+// corresponding environment variables are unset. These mirror the values the
 // gateway used before config was externalized.
 func defaultConfig() Config {
 	return Config{
@@ -48,18 +52,41 @@ func defaultConfig() Config {
 	}
 }
 
-// LoadConfig reads gateway settings from the JSON file at path, layered over
-// defaultConfig so absent keys keep their defaults. A read error is returned
-// with the defaults (caller may warn and continue); a parse error returns the
-// pristine defaults so a malformed file cannot half-apply.
-func LoadConfig(path string) (Config, error) {
+// LoadConfigFromEnv builds the gateway config from environment variables,
+// each falling back to its defaultConfig value when unset or empty.
+func LoadConfigFromEnv() Config {
 	cfg := defaultConfig()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cfg, fmt.Errorf("read gateway config: %w", err)
+	cfg.HTTPAddr = envOr("GATEWAY_HTTP_ADDR", cfg.HTTPAddr)
+	cfg.HTTPSAddr = envOr("GATEWAY_HTTPS_ADDR", cfg.HTTPSAddr)
+	cfg.CertMagicMode = envOr("CERTMAGIC_MODE", cfg.CertMagicMode)
+	cfg.CertMagicDataDir = envOr("CERTMAGIC_DATA_DIR", cfg.CertMagicDataDir)
+	cfg.ErrorPagePath = envOr("GATEWAY_ERROR_PAGE_PATH", cfg.ErrorPagePath)
+	cfg.DomainsConfigPath = envOr("GATEWAY_DOMAINS_CONFIG_PATH", cfg.DomainsConfigPath)
+	cfg.ServicesConfigPath = envOr("GATEWAY_SERVICES_CONFIG_PATH", cfg.ServicesConfigPath)
+	if v := os.Getenv("GATEWAY_ADMIN_HOSTS"); strings.TrimSpace(v) != "" {
+		cfg.AdminHosts = splitAndTrim(v)
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return defaultConfig(), fmt.Errorf("parse gateway config %s: %w", path, err)
+	return cfg
+}
+
+// envOr returns the value of environment variable key, or def if it is unset
+// or empty.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	return cfg, nil
+	return def
+}
+
+// splitAndTrim splits a comma-separated list, dropping empty/whitespace-only
+// entries.
+func splitAndTrim(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }

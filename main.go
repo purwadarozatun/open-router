@@ -31,12 +31,6 @@ import (
 	"poc-proxy-gateway/tlsissuer"
 )
 
-// gatewayConfigPath is the fixed location of the gateway's own config file
-// (the one file whose path cannot itself come from config). Everything else —
-// listen addresses, TLS mode/dir, asset paths, admin hosts — is read from it
-// at startup via LoadConfig, falling back to defaultConfig.
-const gatewayConfigPath = "./config/gateway.json"
-
 // errorPageTemplate holds the error page HTML loaded from the configured path
 // at startup. It falls back to a minimal built-in page if the file is missing
 // so the gateway always renders something.
@@ -46,14 +40,8 @@ var errorPageTemplate = `<!doctype html><html lang="id"><head><meta charset="utf
 
 func main() {
 	// Gateway config first: listen addresses, TLS mode/dir, asset paths and
-	// admin hosts all come from here (defaults when the file is absent).
-	cfg := defaultConfig()
-	if loaded, err := LoadConfig(gatewayConfigPath); err != nil {
-		log.Printf("warning: could not load %s, using defaults: %v", gatewayConfigPath, err)
-	} else {
-		cfg = loaded
-		log.Printf("loaded gateway config from %s", gatewayConfigPath)
-	}
+	// admin hosts all come from environment variables (defaults when unset).
+	cfg := LoadConfigFromEnv()
 
 	// adminHosts are hostnames served locally by this gateway process itself
 	// (the diagnostic routes below), bypassing the reverse proxy. Any other
@@ -227,8 +215,7 @@ func renderErrorPage(c fiber.Ctx, err error) error {
 // names may ever receive a certificate — this replaces Caddy's
 // `on_demand_tls.ask`.
 //
-// The issuance backend is cfg.CertMagicMode, overridable by the
-// CERTMAGIC_MODE env var:
+// The issuance backend is cfg.CertMagicMode (from the CERTMAGIC_MODE env var):
 //
 //   - "acme-staging" — Let's Encrypt staging CA (never production — see
 //     README for why this cannot complete from this dev machine: no public
@@ -254,12 +241,9 @@ func buildTLSConfig(cfg Config) (*tls.Config, error) {
 		},
 	}
 
-	// Config supplies the mode; the CERTMAGIC_MODE env var still wins if set,
-	// so existing run scripts keep working.
+	// cfg.CertMagicMode already reflects the CERTMAGIC_MODE env var (see
+	// LoadConfigFromEnv); default to selfsigned if somehow empty.
 	mode := cfg.CertMagicMode
-	if env := os.Getenv("CERTMAGIC_MODE"); env != "" {
-		mode = env
-	}
 	if mode == "" {
 		mode = "selfsigned"
 	}
