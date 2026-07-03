@@ -1,0 +1,46 @@
+# Dockerfile.prod — runtime-only image.
+#
+# It does NOT compile the gateway. It expects a pre-built static Linux binary
+# to already exist in the build context and just packages it together with the
+# runtime assets it loads at startup (static/404.html, config/*.json).
+#
+# Build the binary first (on the host or via a separate build image):
+#   CGO_ENABLED=0 GOOS=linux go build -o poc-proxy-gateway .
+#
+# Then build & run this image:
+#   docker build -f Dockerfile.prod -t poc-proxy-gateway:prod .
+#   docker run --rm -p 8085:8085 -p 8443:8443 poc-proxy-gateway:prod
+#
+# The binary must be static (CGO_ENABLED=0) so it runs on Alpine's musl libc.
+
+FROM alpine:3.20
+
+# ca-certificates: required for outbound TLS (e.g. ACME to Let's Encrypt when
+# CERTMAGIC_MODE=acme-staging). adduser: run as a non-root user.
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -u 10001 gateway
+
+WORKDIR /app
+
+# Name of the pre-built binary in the build context (override with
+# --build-arg BINARY=... if you named it differently).
+ARG BINARY=poc-proxy-gateway
+
+# Runtime artifacts: the pre-built binary + the files it reads at startup.
+# Paths mirror the app's defaults (./static, ./config relative to WORKDIR).
+COPY ${BINARY} ./gateway
+COPY static/ ./static/
+COPY config/ ./config/
+
+# CertMagic needs a writable data dir for issued certs / the dev CA; keep it on
+# a volume owned by the app user rather than the (relative) default.
+ENV CERTMAGIC_DATA_DIR=/data
+RUN mkdir -p /data && chown -R gateway:gateway /app /data
+VOLUME /data
+
+USER gateway
+
+# Default HTTP + HTTPS listeners (GATEWAY_HTTP_ADDR / GATEWAY_HTTPS_ADDR).
+EXPOSE 8085 8443
+
+ENTRYPOINT ["/app/gateway"]

@@ -1,1 +1,4 @@
 certmagic-data/
+
+# compiled gateway binary (built by CI / Dockerfile.build, not committed)
+/poc-proxy-gateway
